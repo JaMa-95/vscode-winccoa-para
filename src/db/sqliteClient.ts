@@ -74,12 +74,34 @@ export class SqliteClient {
     ).all(dptId) as DpElement[];
   }
 
+  getElementByDptAndElId(dptId: number, elId: number): DpElement | undefined {
+    return this.identDb!.prepare(
+      'SELECT el_id, dpt_id, position_in_type, parent_el_id, datatype, referenced_type, source_dpt_id, source_el_id, canonical_name, modification_time FROM datapoint_element WHERE dpt_id = ? AND el_id = ?'
+    ).get(dptId, elId) as DpElement | undefined;
+  }
+
+  /** Get element info by dp_id + el_id (looks up dpt_id from datapoint first) */
+  getElementByIds(dpId: number, elId: number): DpElement | undefined {
+    const dp = this.identDb!.prepare(
+      'SELECT dpt_id FROM datapoint WHERE dp_id = ?'
+    ).get(dpId) as { dpt_id: number } | undefined;
+    if (!dp) return undefined;
+    return this.getElementByDptAndElId(dp.dpt_id, elId);
+  }
+
   // ──── Datapoints ────
 
   getAllDatapoints(): Datapoint[] {
     return this.identDb!.prepare(
       'SELECT dp_id, dpt_id, canonical_name, modification_time FROM datapoint ORDER BY canonical_name'
     ).all() as Datapoint[];
+  }
+
+  getDatapointName(dpId: number): string | undefined {
+    const row = this.identDb!.prepare(
+      'SELECT canonical_name FROM datapoint WHERE dp_id = ?'
+    ).get(dpId) as { canonical_name: string } | undefined;
+    return row?.canonical_name;
   }
 
   getDatapointsByDptId(dptId: number): Datapoint[] {
