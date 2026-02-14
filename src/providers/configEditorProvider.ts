@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import type { SqliteClient } from '../db/sqliteClient';
+import type { McpClient } from '../api/mcpClient';
 import type { DpeConfigs } from '../models/configs';
-import { getTypeName } from '../models/types';
+import { getTypeName, isLeafType } from '../models/types';
 
 export class ConfigEditorPanel {
   public static currentPanel: ConfigEditorPanel | undefined;
@@ -10,12 +11,24 @@ export class ConfigEditorPanel {
   private readonly panel: vscode.WebviewPanel;
   private disposables: vscode.Disposable[] = [];
 
+  private currentDpId = 0;
+  private currentElId = 0;
+  private currentLabel = '';
+
   private constructor(
     panel: vscode.WebviewPanel,
     private db: SqliteClient,
+    private mcpClient: McpClient | null,
   ) {
     this.panel = panel;
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+
+    // Handle messages from webview
+    this.panel.webview.onDidReceiveMessage(
+      (msg) => this.handleMessage(msg),
+      null,
+      this.disposables,
+    );
   }
 
   public static show(
@@ -24,10 +37,12 @@ export class ConfigEditorPanel {
     elId: number,
     label: string,
     extensionUri: vscode.Uri,
+    mcpClient: McpClient | null = null,
   ): void {
     const column = vscode.ViewColumn.One;
 
     if (ConfigEditorPanel.currentPanel) {
+      ConfigEditorPanel.currentPanel.mcpClient = mcpClient;
       ConfigEditorPanel.currentPanel.panel.reveal(column);
       ConfigEditorPanel.currentPanel.update(db, dpId, elId, label);
       return;
@@ -37,14 +52,67 @@ export class ConfigEditorPanel {
       ConfigEditorPanel.viewType,
       `Config: ${label}`,
       column,
-      { enableScripts: false, retainContextWhenHidden: true },
+      { enableScripts: true, retainContextWhenHidden: true },
     );
 
-    ConfigEditorPanel.currentPanel = new ConfigEditorPanel(panel, db);
+    ConfigEditorPanel.currentPanel = new ConfigEditorPanel(panel, db, mcpClient);
     ConfigEditorPanel.currentPanel.update(db, dpId, elId, label);
   }
 
+  private handleMessage(msg: { command: string; value?: string }): void {
+    if (msg.command === 'setValue' && msg.value !== undefined) {
+      this.setValueViaMcp(msg.value);
+    }
+  }
+
+  private async setValueViaMcp(rawValue: string): Promise<void> {
+    if (!this.mcpClient || !this.mcpClient.isConfigured) {
+      vscode.window.showWarningMessage(
+        'Cannot set values: MCP HTTP server not configured. Ensure the WinCC OA MCP server is running.',
+      );
+      return;
+    }
+
+    // Build the full DPE name (e.g., "ExampleDP_DDE.f1")
+    const dpName = this.db.getDatapointName(this.currentDpId);
+    if (!dpName) {
+      vscode.window.showErrorMessage('Cannot determine datapoint name.');
+      return;
+    }
+
+    const element = this.db.getElementByIds(this.currentDpId, this.currentElId);
+    if (!element) {
+      vscode.window.showErrorMessage('Cannot determine element path.');
+      return;
+    }
+
+    // Build the full element path from the element tree
+    const dpePath = this.db.getElementPath(this.currentDpId, this.currentElId);
+    const fullDpe = dpePath ? `${dpName}.${dpePath}` : dpName;
+
+    // Parse the value
+    let parsed: unknown = rawValue;
+    if (rawValue === 'true') parsed = true;
+    else if (rawValue === 'false') parsed = false;
+    else if (rawValue !== '' && !isNaN(Number(rawValue))) parsed = Number(rawValue);
+
+    const result = await this.mcpClient.dpSet(fullDpe, parsed);
+
+    if (result.success) {
+      vscode.window.showInformationMessage(`Value set: ${fullDpe} = ${rawValue}`);
+      // Wait briefly for WinCC OA to update SQLite, then refresh
+      setTimeout(() => {
+        this.update(this.db, this.currentDpId, this.currentElId, this.currentLabel);
+      }, 500);
+    } else {
+      vscode.window.showErrorMessage(`Failed to set value: ${result.error}`);
+    }
+  }
+
   private update(db: SqliteClient, dpId: number, elId: number, label: string): void {
+    this.currentDpId = dpId;
+    this.currentElId = elId;
+    this.currentLabel = label;
     this.panel.title = `Config: ${label}`;
 
     const configs: DpeConfigs = {
@@ -61,11 +129,12 @@ export class ConfigEditorPanel {
       unitAndFormat: db.getUnitAndFormat(dpId, elId),
     };
 
-    // Get element info from ident DB
     const element = db.getElementByIds(dpId, elId);
     const dpName = db.getDatapointName(dpId);
+    const datatype = element?.datatype;
+    const isLeaf = datatype !== undefined && isLeafType(datatype);
 
-    this.panel.webview.html = this.getHtml(label, dpId, elId, dpName, element?.datatype, configs);
+    this.panel.webview.html = this.getHtml(label, dpId, elId, dpName, datatype, isLeaf, configs);
   }
 
   private getHtml(
@@ -74,6 +143,7 @@ export class ConfigEditorPanel {
     elId: number,
     dpName: string | undefined,
     datatype: number | undefined,
+    isLeaf: boolean,
     configs: DpeConfigs,
   ): string {
     const typeName = datatype !== undefined ? getTypeName(datatype) : 'unknown';
@@ -84,36 +154,28 @@ export class ConfigEditorPanel {
     // Header
     sections.push(`
       <div class="header">
-        <h2>${escapeHtml(fullPath)}</h2>
+        <h2>${esc(fullPath)}</h2>
         <div class="meta">
-          <span class="badge type">${escapeHtml(typeName)}</span>
+          <span class="badge type">${esc(typeName)}</span>
           <span class="meta-item">dp_id: ${dpId}</span>
           <span class="meta-item">el_id: ${elId}</span>
-          ${configs.unitAndFormat ? `<span class="badge unit">${escapeHtml(configs.unitAndFormat.unit || 'no unit')}</span>` : ''}
-          ${configs.displayName ? `<span class="meta-item">Display: ${escapeHtml(configs.displayName.text)}</span>` : ''}
+          ${configs.unitAndFormat ? `<span class="badge unit">${esc(configs.unitAndFormat.unit || 'no unit')}</span>` : ''}
+          ${configs.displayName ? `<span class="meta-item">Display: ${esc(configs.displayName.text)}</span>` : ''}
         </div>
       </div>
     `);
 
-    // Current Value
-    sections.push(this.renderLastValue(configs));
+    // _original (Current Value) — only for leaf elements
+    if (isLeaf) {
+      sections.push(this.renderOriginal(configs, typeName));
+    }
 
-    // Address Config
+    // Config sections
     sections.push(this.renderAddress(configs));
-
-    // Alert Handling
     sections.push(this.renderAlertHdl(configs));
-
-    // Archive Config
     sections.push(this.renderArchive(configs));
-
-    // PV Range
     sections.push(this.renderPvRange(configs));
-
-    // Smoothing
     sections.push(this.renderSmooth(configs));
-
-    // Distribution
     sections.push(this.renderDistrib(configs));
 
     return `<!DOCTYPE html>
@@ -187,9 +249,6 @@ export class ConfigEditorPanel {
       border-bottom: 1px solid var(--vscode-panel-border);
       font-weight: 600;
     }
-    .section-header .icon {
-      margin-right: 6px;
-    }
     .section-body {
       padding: 12px;
     }
@@ -199,6 +258,27 @@ export class ConfigEditorPanel {
     }
     .section.empty .section-body {
       display: none;
+    }
+    .section.original {
+      border-left: 3px solid var(--vscode-charts-blue, #3794ff);
+    }
+    .section.address {
+      border-left: 3px solid var(--vscode-charts-orange, #d18616);
+    }
+    .section.alert {
+      border-left: 3px solid var(--vscode-charts-red, #f14c4c);
+    }
+    .section.archive {
+      border-left: 3px solid var(--vscode-charts-green, #89d185);
+    }
+    .section.pvrange {
+      border-left: 3px solid var(--vscode-charts-purple, #b180d7);
+    }
+    .section.smooth {
+      border-left: 3px solid var(--vscode-charts-yellow, #cca700);
+    }
+    .section.distrib {
+      border-left: 3px solid var(--vscode-descriptionForeground);
     }
     table {
       width: 100%;
@@ -231,6 +311,47 @@ export class ConfigEditorPanel {
       font-size: 0.85em;
       margin-top: 4px;
     }
+    .value-none {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      margin-bottom: 8px;
+    }
+    .value-edit {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .value-edit input {
+      flex: 1;
+      padding: 4px 8px;
+      font-size: 1.1em;
+      font-family: var(--vscode-editor-font-family, monospace);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 3px;
+      outline: none;
+    }
+    .value-edit input:focus {
+      border-color: var(--vscode-focusBorder);
+    }
+    .value-unit {
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.95em;
+    }
+    .value-edit button {
+      padding: 4px 14px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 0.95em;
+    }
+    .value-edit button:hover {
+      background: var(--vscode-button-hoverBackground);
+    }
     .detail-table {
       margin-top: 8px;
     }
@@ -246,47 +367,87 @@ export class ConfigEditorPanel {
 </head>
 <body>
   ${sections.join('\n')}
+  <script>
+    (function() {
+      const vscode = acquireVsCodeApi();
+      const input = document.getElementById('valueInput');
+      const btn = document.getElementById('setValueBtn');
+      if (btn && input) {
+        btn.addEventListener('click', function() {
+          vscode.postMessage({ command: 'setValue', value: input.value });
+        });
+        input.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') {
+            vscode.postMessage({ command: 'setValue', value: input.value });
+          }
+        });
+      }
+    })();
+  </script>
 </body>
 </html>`;
   }
 
-  private renderLastValue(configs: DpeConfigs): string {
+  /** _original config — always shown for leaf elements */
+  private renderOriginal(configs: DpeConfigs, elementTypeName: string): string {
     const lv = configs.lastValue;
+    const unit = configs.unitAndFormat?.unit || '';
+    const valueStr = lv && lv.value !== null && lv.value !== undefined ? String(lv.value) : '';
+
+    const inputHtml = `
+      <div class="value-edit">
+        <input type="text" id="valueInput" value="${esc(valueStr)}" placeholder="Enter value" />
+        ${unit ? `<span class="value-unit">${esc(unit)}</span>` : ''}
+        <button id="setValueBtn">Set</button>
+      </div>
+    `;
+
     if (!lv) {
-      return this.renderEmptySection('Current Value', 'symbol-variable');
+      return `
+        <div class="section original">
+          <div class="section-header"><span>Original Value</span></div>
+          <div class="section-body">
+            <span class="value-none">No value recorded</span>
+            ${inputHtml}
+          </div>
+        </div>
+      `;
     }
 
-    const timestamp = lv.original_time
-      ? new Date(lv.original_time * 1000).toISOString().replace('T', ' ').replace('Z', '')
-      : 'n/a';
+    const timestamp = formatNanosTimestamp(lv.original_time);
+    const sysTimestamp = formatNanosTimestamp(lv.system_time);
+    const statusHex = formatStatus64(lv.status_64);
 
-    const valueStr = lv.value !== null && lv.value !== undefined ? String(lv.value) : 'null';
-    const unit = configs.unitAndFormat?.unit || '';
-
-    return this.renderSection('Current Value', 'symbol-variable', `
-      <div class="value-display">${escapeHtml(valueStr)} ${escapeHtml(unit)}</div>
-      <div class="value-timestamp">Last updated: ${escapeHtml(timestamp)}</div>
-      <table style="margin-top: 8px;">
-        <tr><th>Status</th><td>0x${(lv.status_64 ?? 0).toString(16).toUpperCase()}</td></tr>
-        <tr><th>Variable Type</th><td>${getTypeName(lv.variable_type)}</td></tr>
-        <tr><th>Manager ID</th><td>${lv.manager_id}</td></tr>
-        <tr><th>User ID</th><td>${lv.user_id}</td></tr>
-      </table>
-    `);
+    return `
+      <div class="section original">
+        <div class="section-header"><span>Original Value</span></div>
+        <div class="section-body">
+          ${inputHtml}
+          <div class="value-timestamp">Source time: ${esc(timestamp)}</div>
+          <div class="value-timestamp">System time: ${esc(sysTimestamp)}</div>
+          <table style="margin-top: 8px;">
+            <tr><th>Status</th><td>${esc(statusHex)}</td></tr>
+            <tr><th>Type</th><td>${esc(elementTypeName)}</td></tr>
+            <tr><th>Manager</th><td>${lv.manager_id}</td></tr>
+            <tr><th>User</th><td>${lv.user_id}</td></tr>
+          </table>
+        </div>
+      </div>
+    `;
   }
 
   private renderAddress(configs: DpeConfigs): string {
     const addr = configs.address;
     if (!addr) {
-      return this.renderEmptySection('Address', 'plug');
+      return this.renderEmptySection('Address', 'address');
     }
 
-    return this.renderSection('Address', 'plug', `
+    return this.renderSection('Address', 'address', `
       <table>
-        <tr><th>Reference</th><td>${escapeHtml(addr.reference || '')}</td></tr>
-        <tr><th>Driver Ident</th><td>${escapeHtml(addr.drv_ident || '')}</td></tr>
-        <tr><th>Poll Group</th><td>${escapeHtml(addr.poll_group || '')}</td></tr>
-        <tr><th>Connection</th><td>${escapeHtml(addr.connection || '')}</td></tr>
+        <tr><th>Reference</th><td>${esc(addr.reference || '')}</td></tr>
+        <tr><th>Driver Ident</th><td>${esc(addr.drv_ident || '')}</td></tr>
+        <tr><th>Poll Group</th><td>${esc(addr.poll_group || '')}</td></tr>
+        <tr><th>Connection</th><td>${esc(addr.connection || '')}</td></tr>
         <tr><th>Subindex</th><td>${addr.subindex}</td></tr>
         <tr><th>Offset</th><td>${addr.offset}</td></tr>
         <tr><th>Response Mode</th><td>${addr.response_mode}</td></tr>
@@ -298,10 +459,9 @@ export class ConfigEditorPanel {
   private renderAlertHdl(configs: DpeConfigs): string {
     const ah = configs.alertHdl;
     if (!ah) {
-      return this.renderEmptySection('Alert Handling', 'bell');
+      return this.renderEmptySection('Alert Handling', 'alert');
     }
 
-    const activeLabel = ah.active ? 'Active' : 'Inactive';
     const activeBadge = ah.active
       ? '<span class="badge active">Active</span>'
       : '<span class="badge inactive">Inactive</span>';
@@ -318,12 +478,12 @@ export class ConfigEditorPanel {
       const rows = details.map(d => {
         const range = d.l_limit !== null && d.u_limit !== null
           ? `${d.l_incl ? '[' : '('}${d.l_limit} .. ${d.u_limit}${d.u_incl ? ']' : ')'}`
-          : d.match !== null ? `match: "${escapeHtml(d.match)}"` : 'n/a';
+          : d.match !== null ? `match: "${esc(d.match)}"` : 'n/a';
         return `<tr>
           <td>${d.detail_nr}</td>
           <td>${d.range_type}</td>
           <td>${range}</td>
-          <td>${escapeHtml(d.add_text || '')}</td>
+          <td>${esc(d.add_text || '')}</td>
           <td>${d.class_dp_id}:${d.class_el_id}</td>
         </tr>`;
       }).join('');
@@ -336,14 +496,14 @@ export class ConfigEditorPanel {
       `;
     }
 
-    return this.renderSection('Alert Handling', 'bell', `
+    return this.renderSection('Alert Handling', 'alert', `
       <table>
         <tr><th>Status</th><td>${activeBadge}</td></tr>
         <tr><th>Config Type</th><td>${configTypes[ah.config_type] || ah.config_type}</td></tr>
         <tr><th>Discrete States</th><td>${ah.discrete_states}</td></tr>
         <tr><th>Impulse</th><td>${ah.impulse ? 'Yes' : 'No'}</td></tr>
         <tr><th>Min Priority</th><td>${ah.min_prio}</td></tr>
-        <tr><th>Panel</th><td>${escapeHtml(ah.panel || '')}</td></tr>
+        <tr><th>Panel</th><td>${esc(ah.panel || '')}</td></tr>
         <tr><th>Orig Handler</th><td>${ah.orig_hdl}</td></tr>
         <tr><th>Multi-Instance</th><td>${ah.multi_instance ? 'Yes' : 'No'}</td></tr>
       </table>
@@ -380,7 +540,7 @@ export class ConfigEditorPanel {
           <tr><th>Std Type</th><td>${ad.std_type}</td></tr>
           <tr><th>Std Tolerance</th><td>${ad.std_tol}</td></tr>
           <tr><th>Std Time</th><td>${ad.std_time}</td></tr>
-          <tr><th>Class</th><td>${escapeHtml(ad.class || '')}</td></tr>
+          <tr><th>Class</th><td>${esc(ad.class || '')}</td></tr>
         </table>
       `;
     }
@@ -396,20 +556,20 @@ export class ConfigEditorPanel {
   private renderPvRange(configs: DpeConfigs): string {
     const pv = configs.pvRange;
     if (!pv) {
-      return this.renderEmptySection('PV Range', 'arrow-both');
+      return this.renderEmptySection('PV Range', 'pvrange');
     }
 
-    const min = pv.min !== null ? `${pv.incl_min ? '[' : '('}${pv.min}` : '(-inf';
-    const max = pv.max !== null ? `${pv.max}${pv.incl_max ? ']' : ')'}` : '+inf)';
+    const min = pv.min !== null ? `${pv.incl_min ? '[' : '('}${pv.min}` : '(-\u221e';
+    const max = pv.max !== null ? `${pv.max}${pv.incl_max ? ']' : ')'}` : '+\u221e)';
 
-    return this.renderSection('PV Range', 'arrow-both', `
+    return this.renderSection('PV Range', 'pvrange', `
       <table>
         <tr><th>Range</th><td>${min} .. ${max}</td></tr>
         <tr><th>Config Type</th><td>${pv.config_type}</td></tr>
         <tr><th>Variable Type</th><td>${getTypeName(pv.variable_type)}</td></tr>
         <tr><th>Ignore Invalid</th><td>${pv.ignor_inv ? 'Yes' : 'No'}</td></tr>
         <tr><th>Negate</th><td>${pv.neg ? 'Yes' : 'No'}</td></tr>
-        ${pv.match !== null ? `<tr><th>Match</th><td>${escapeHtml(pv.match)}</td></tr>` : ''}
+        ${pv.match !== null ? `<tr><th>Match</th><td>${esc(pv.match)}</td></tr>` : ''}
       </table>
     `);
   }
@@ -417,7 +577,7 @@ export class ConfigEditorPanel {
   private renderSmooth(configs: DpeConfigs): string {
     const sm = configs.smooth;
     if (!sm) {
-      return this.renderEmptySection('Smoothing', 'pulse');
+      return this.renderEmptySection('Smoothing', 'smooth');
     }
 
     const smoothTypes: Record<number, string> = {
@@ -426,7 +586,7 @@ export class ConfigEditorPanel {
       2: 'Old/New + tolerance',
     };
 
-    return this.renderSection('Smoothing', 'pulse', `
+    return this.renderSection('Smoothing', 'smooth', `
       <table>
         <tr><th>Type</th><td>${smoothTypes[sm.type] || sm.type}</td></tr>
         <tr><th>Std Type</th><td>${sm.std_type}</td></tr>
@@ -439,32 +599,30 @@ export class ConfigEditorPanel {
   private renderDistrib(configs: DpeConfigs): string {
     const dist = configs.distrib;
     if (!dist) {
-      return this.renderEmptySection('Distribution', 'server');
+      return this.renderEmptySection('Distribution', 'distrib');
     }
 
-    return this.renderSection('Distribution', 'server', `
+    return this.renderSection('Distribution', 'distrib', `
       <table>
         <tr><th>Driver Number</th><td>${dist.driver_number}</td></tr>
       </table>
     `);
   }
 
-  private renderSection(title: string, icon: string, body: string): string {
+  private renderSection(title: string, cssClass: string, body: string): string {
     return `
-      <div class="section">
-        <div class="section-header">
-          <span><span class="icon">$(${icon})</span>${escapeHtml(title)}</span>
-        </div>
+      <div class="section ${cssClass}">
+        <div class="section-header"><span>${esc(title)}</span></div>
         <div class="section-body">${body}</div>
       </div>
     `;
   }
 
-  private renderEmptySection(title: string, icon: string): string {
+  private renderEmptySection(title: string, cssClass: string): string {
     return `
-      <div class="section empty">
+      <div class="section ${cssClass} empty">
         <div class="section-header">
-          <span><span class="icon">$(${icon})</span>${escapeHtml(title)}</span>
+          <span>${esc(title)}</span>
           <span class="meta-item">not configured</span>
         </div>
       </div>
@@ -481,10 +639,41 @@ export class ConfigEditorPanel {
   }
 }
 
-function escapeHtml(str: string): string {
+function esc(str: string): string {
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+/** Convert nanoseconds-since-epoch string to human-readable datetime */
+function formatNanosTimestamp(nanosStr: string | null): string {
+  if (!nanosStr) return 'n/a';
+  try {
+    // Nanoseconds → milliseconds: drop last 6 digits
+    const ms = nanosStr.length > 6
+      ? Number(nanosStr.slice(0, -6))
+      : 0;
+    if (isNaN(ms) || ms <= 0) return 'n/a';
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const millis = nanosStr.slice(-9, -6) || '000';
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${millis}`;
+  } catch {
+    return nanosStr;
+  }
+}
+
+/** Format 64-bit status as hex string */
+function formatStatus64(statusStr: string | null): string {
+  if (!statusStr) return '0x0';
+  try {
+    const n = BigInt(statusStr);
+    // Show as unsigned hex
+    const hex = (n < 0n ? (n + (1n << 64n)) : n).toString(16).toUpperCase();
+    return `0x${hex}`;
+  } catch {
+    return statusStr;
+  }
 }
