@@ -29,23 +29,13 @@
       "winccoa-para": [
         {
           "id": "winccoa-para.dptView",
-          "name": "Datapoint Types"
-        },
-        {
-          "id": "winccoa-para.dpView",
-          "name": "Datapoints"
+          "name": "Datapoint Types & Datapoints"
         }
       ]
     },
     "commands": [
       {
         "command": "winccoa-para.refreshDptTree",
-        "title": "Refresh",
-        "icon": "$(refresh)",
-        "category": "WinCC OA PARA"
-      },
-      {
-        "command": "winccoa-para.refreshDpTree",
         "title": "Refresh",
         "icon": "$(refresh)",
         "category": "WinCC OA PARA"
@@ -66,11 +56,6 @@
         {
           "command": "winccoa-para.refreshDptTree",
           "when": "view == winccoa-para.dptView",
-          "group": "navigation"
-        },
-        {
-          "command": "winccoa-para.refreshDpTree",
-          "when": "view == winccoa-para.dpView",
           "group": "navigation"
         }
       ]
