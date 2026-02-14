@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { SqliteClient } from './db/sqliteClient';
 import { DptTreeProvider } from './providers/dptTreeProvider';
 import { DpTreeProvider } from './providers/dpTreeProvider';
+import { ConfigEditorPanel } from './providers/configEditorProvider';
 
 let sqliteClient: SqliteClient;
 let dptTreeProvider: DptTreeProvider;
@@ -33,7 +34,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('winccoa-para.selectProject', () => selectProject()),
     vscode.commands.registerCommand('winccoa-para.openConfigEditor', (item) => {
       if (item && item.dpId !== undefined && item.elId !== undefined) {
-        openConfigEditor(item.dpId, item.elId, item.label);
+        openConfigEditor(item.dpId, item.elId, item.label, context.extensionUri);
       }
     }),
   );
@@ -112,43 +113,11 @@ async function selectProject(): Promise<void> {
   }
 }
 
-function openConfigEditor(dpId: number, elId: number, label: string): void {
+function openConfigEditor(dpId: number, elId: number, label: string, extensionUri: vscode.Uri): void {
   if (!sqliteClient.isOpen) {
     vscode.window.showWarningMessage('No WinCC OA project connected.');
     return;
   }
 
-  // Gather all config data for this DPE
-  const address = sqliteClient.getAddressConfig(dpId, elId);
-  const alertHdl = sqliteClient.getAlertHdlConfig(dpId, elId);
-  const alertHdlDetails = sqliteClient.getAlertHdlDetails(dpId, elId);
-  const archive = sqliteClient.getArchiveConfig(dpId, elId);
-  const archiveDetail = sqliteClient.getArchiveDetail(dpId, elId);
-  const pvRange = sqliteClient.getPvRangeConfig(dpId, elId);
-  const smooth = sqliteClient.getSmoothConfig(dpId, elId);
-  const distrib = sqliteClient.getDistribConfig(dpId, elId);
-  const lastValue = sqliteClient.getLastValue(dpId, elId);
-  const displayName = sqliteClient.getDisplayName(dpId, elId);
-  const unitAndFormat = sqliteClient.getUnitAndFormat(dpId, elId);
-
-  const configs = {
-    address,
-    alertHdl,
-    alertHdlDetails,
-    archive,
-    archiveDetail,
-    pvRange,
-    smooth,
-    distrib,
-    lastValue,
-    displayName,
-    unitAndFormat,
-  };
-
-  // For now, show configs in an output channel (webview comes in Phase 2)
-  const outputChannel = vscode.window.createOutputChannel('WinCC OA Config', 'json');
-  outputChannel.clear();
-  outputChannel.appendLine(`// Config for: ${label} (dp_id=${dpId}, el_id=${elId})`);
-  outputChannel.appendLine(JSON.stringify(configs, null, 2));
-  outputChannel.show();
+  ConfigEditorPanel.show(sqliteClient, dpId, elId, label, extensionUri);
 }
