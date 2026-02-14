@@ -39,12 +39,41 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
+  // Listen for project changes from winccoa-project-admin
+  listenToProjectAdmin(context);
+
   // Try to auto-detect project on activation
   autoDetectProject();
 }
 
 export function deactivate() {
   sqliteClient?.close();
+}
+
+function getProjectAdminApi(): ProjectAdminApi | undefined {
+  try {
+    return vscode.extensions.getExtension('winccoa-tools-pack.winccoa-project-admin')?.exports;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ProjectAdminApi {
+  getCurrentProject(): { projectDir: string } | undefined;
+  onDidChangeProject(listener: (project: { projectDir: string } | undefined) => void): () => void;
+}
+
+function listenToProjectAdmin(context: vscode.ExtensionContext): void {
+  const api = getProjectAdminApi();
+  if (!api?.onDidChangeProject) return;
+
+  const dispose = api.onDidChangeProject((project) => {
+    if (project?.projectDir) {
+      connectToProject(project.projectDir);
+    }
+  });
+
+  context.subscriptions.push({ dispose });
 }
 
 async function autoDetectProject(): Promise<void> {
@@ -54,17 +83,13 @@ async function autoDetectProject(): Promise<void> {
     return connectToProject(configPath);
   }
 
-  // 2. Try to get project from winccoa-project-admin extension
-  try {
-    const projectAdminApi = vscode.extensions.getExtension('winccoa-tools-pack.winccoa-project-admin')?.exports;
-    if (projectAdminApi?.getCurrentProject) {
-      const project = projectAdminApi.getCurrentProject();
-      if (project?.projectDir) {
-        return connectToProject(project.projectDir);
-      }
+  // 2. Try to get current project from winccoa-project-admin
+  const api = getProjectAdminApi();
+  if (api?.getCurrentProject) {
+    const project = api.getCurrentProject();
+    if (project?.projectDir) {
+      return connectToProject(project.projectDir);
     }
-  } catch {
-    // Extension not available
   }
 
   // 3. Check workspace folders for WinCC OA project structure
