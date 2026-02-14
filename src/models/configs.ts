@@ -118,9 +118,12 @@ export interface LastValue {
   language_id: number;
   value: unknown;
   variable_type: number;
-  original_time: number | null;
-  system_time: number | null;
-  status_64: number;
+  /** Nanoseconds since epoch, stored as string to avoid JS precision loss */
+  original_time: string | null;
+  /** Nanoseconds since epoch, stored as string to avoid JS precision loss */
+  system_time: string | null;
+  /** 64-bit status field, stored as string to avoid JS precision loss */
+  status_64: string | null;
   user_id: number;
   manager_id: number;
 }
