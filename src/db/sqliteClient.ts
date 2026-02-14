@@ -89,6 +89,32 @@ export class SqliteClient {
     return this.getElementByDptAndElId(dp.dpt_id, elId);
   }
 
+  /** Build the full element path from root to the given element (e.g., "alert.controlFuse") */
+  getElementPath(dpId: number, elId: number): string | undefined {
+    const dp = this.identDb!.prepare(
+      'SELECT dpt_id FROM datapoint WHERE dp_id = ?'
+    ).get(dpId) as { dpt_id: number } | undefined;
+    if (!dp) return undefined;
+
+    const elements = this.getElementsByDptId(dp.dpt_id);
+    const elMap = new Map(elements.map(e => [e.el_id, e]));
+
+    // Walk up from elId to root, collecting names (skip root element)
+    const parts: string[] = [];
+    let current = elMap.get(elId);
+    while (current) {
+      const parent = elMap.get(current.parent_el_id);
+      // Stop if we reached the root element (parent_el_id === 0 or self-referencing)
+      if (!parent || current.parent_el_id === 0 || current.el_id === current.parent_el_id) {
+        break;
+      }
+      parts.unshift(current.canonical_name);
+      current = parent;
+    }
+
+    return parts.length > 0 ? parts.join('.') : undefined;
+  }
+
   // ──── Datapoints ────
 
   getAllDatapoints(): Datapoint[] {
@@ -177,8 +203,16 @@ export class SqliteClient {
   // ──── Last Values ────
 
   getLastValue(dpId: number, elId: number): LastValue | undefined {
+    // Timestamps and status_64 are 64-bit integers beyond JS MAX_SAFE_INTEGER.
+    // Cast to TEXT in SQL to avoid precision loss.
     return this.lastValueDb!.prepare(
-      'SELECT * FROM last_value WHERE dp_id = ? AND el_id = ? AND dyn_idx = 0 AND language_id = 0'
+      `SELECT dp_id, el_id, dyn_idx, language_id, value, variable_type,
+        CAST(original_time AS TEXT) as original_time,
+        CAST(system_time AS TEXT) as system_time,
+        CAST(status_64 AS TEXT) as status_64,
+        user_id, manager_id
+      FROM last_value WHERE dp_id = ? AND el_id = ? AND dyn_idx = 0 AND language_id = 0`
     ).get(dpId, elId) as LastValue | undefined;
   }
+
 }
