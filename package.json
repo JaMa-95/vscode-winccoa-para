@@ -89,14 +89,16 @@
   "scripts": {
     "compile": "webpack --mode production",
     "watch": "webpack --mode development --watch",
-    "package": "vsce package",
+    "rebuild": "electron-rebuild -v 39.3.0",
+    "package": "npm run rebuild && vsce package",
     "lint": "eslint src --ext ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^12.6.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.8",
+    "@electron/rebuild": "^4.0.3",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.106.0",
     "ts-loader": "^9.5.1",
